@@ -118,20 +118,20 @@ Default `configs/default.yaml`:
 - `workflow: fl2va` — do not load `transformer_ref`
 - `dtype: bfloat16`
 - `cpu_offload: true`
-- `memory_reserve_margin: 12GB`
+- `memory_reserve_margin: 20GB`
 - Flash Attention 3 via local `_flash_3` (then SDPA). Hub kernels are disabled.
 
 What lives on the H100 at peak:
 
 1. Active transformer blocks (paged in by the offload manager)
 2. Working latents for 124×1376×768
-3. 12 GB free headroom for CUDA graphs / allocator spikes
+3. 20 GB target headroom for VAE decode and allocator spikes
 
 If you OOM:
 
 1. Drop to 544p (`0.5` MP, 960×544) or 4-step 768p LoRA
 2. Keep duration at 5 s
-3. Raise `memory_reserve_margin` to `16GB`
+3. Raise `memory_reserve_margin` above `20GB`
 4. Or switch to `lightx2v/MiniMax-H3-int8c` and set `cpu_offload: false`
 
 ## 7. Launch

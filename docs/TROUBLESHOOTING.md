@@ -15,8 +15,14 @@ Single H100 80 GB needs CPU offload for full bf16 FL2VA.
 - Use 8-step or 4-step turbo LoRA, not 50 NFE base, for first tests.
 - Drop megapixels from `1.0` to `0.5`.
 - Keep duration at 5 s.
-- Raise `memory_reserve_margin` to `16GB`.
+- The default reserve is now `20GB`; raise it further if using a long or
+  unusually shaped canvas.
 - Do not load Ref2VA (`transformer_ref`).
+
+The engine now offloads every managed component before and after each request,
+clears CUDA caches, and catches OOM so another request can be attempted without
+restarting. `app.py` also sets
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` before importing Torch.
 
 ## `Local MiniMax-H3 snapshot not found`
 

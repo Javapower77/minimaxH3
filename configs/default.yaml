@@ -11,7 +11,9 @@ dtype: bfloat16
 
 # Official single-GPU recipe: ComponentsManager auto CPU offload.
 cpu_offload: true
-memory_reserve_margin: 12GB
+# H3 decode needs multi-GiB transient buffers. Keep substantial headroom on
+# the 94 GiB H100 NVL instead of filling it with resident component weights.
+memory_reserve_margin: 20GB
 attention_backend: _flash_3
 
 output_dir: outputs

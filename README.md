@@ -45,8 +45,10 @@ Constraints from the official model card:
 ## Why CPU offload on one H100
 
 A single 80 GB H100 **cannot** hold full bf16 MiniMax-H3 + Qwen3-VL-32B.
-The official single-GPU recipe is Diffusers `ComponentsManager` auto CPU
 offload with a **12 GB** reserve. This project uses that recipe.
+The official single-GPU recipe is Diffusers `ComponentsManager` auto CPU
+offload. This project uses a more conservative **20 GB** reserve and explicitly
+evicts managed components between requests to leave room for VAE decode buffers.
 
 Optional faster path (not the default): load
 `lightx2v/MiniMax-H3-int8c` (INT8 transformer, ~33 GB) and skip CPU
@@ -109,7 +111,7 @@ minimaxH3/
 | canvas | 1.0 MP 16:9 → **1376×768** |
 | duration | 5 s (124 frames) |
 | attention | `_flash_3`, then local SDPA (no Hub kernels) |
-| offload | on, `memory_reserve_margin=12GB` |
+| offload | on, `memory_reserve_margin=20GB`; evict between requests |
 
 4-step 768p is faster and slightly softer. Base model (no LoRA) wants **~50 NFE**.
 

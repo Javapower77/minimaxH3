@@ -29,6 +29,9 @@ OFFLINE_ENV = {
     "GRADIO_MCP_SERVER": "False",
 }
 
+# This is effective when set before torch imports (app.py/generate.py do so).
+CUDA_ALLOC_CONF = "expandable_segments:True"
+
 HUB_ATTENTION_BACKENDS = {
     "_flash_3_hub",
     "_flash_3_varlen_hub",
@@ -65,6 +68,7 @@ def enforce_offline_runtime() -> None:
     """Pin process-wide flags so Hub / Gradio / telemetry stay dark."""
     for key, value in OFFLINE_ENV.items():
         os.environ[key] = value
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", CUDA_ALLOC_CONF)
     os.environ.pop("GRADIO_SHARE_SERVER_ADDRESS", None)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 import time
@@ -168,6 +169,45 @@ class MiniMaxH3Engine:
                 logger.warning("Attention backend %s unavailable (%s)", name, exc)
         logger.warning("Falling back to default SDPA attention (%s)", last_error)
 
+    def _release_cuda_memory(self, *, offload_components: bool = True) -> None:
+        """Return resident pipeline components and stale allocations to CPU.
+
+        ComponentsManager intentionally keeps models on GPU until another model
+        requires their space. H3's VAE then needs a large transient allocation,
+        and a nearly-full card can OOM before that policy reacts. Explicitly
+        offloading attached hooks between requests gives every stage a clean
+        memory budget without unloading the pipeline or LoRAs.
+        """
+        if offload_components and self.components_manager is not None:
+            for hook in self.components_manager.model_hooks or []:
+                try:
+                    hook.offload()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not offload %s: %s", hook.model_id, exc)
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CUDA synchronize during cleanup failed: %s", exc)
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CUDA cache cleanup failed: %s", exc)
+
+    @staticmethod
+    def _cuda_memory_summary() -> str:
+        if not torch.cuda.is_available():
+            return "CUDA unavailable"
+        free, total = torch.cuda.mem_get_info()
+        gib = 1024**3
+        return (
+            f"free={free / gib:.2f}GiB total={total / gib:.2f}GiB "
+            f"allocated={torch.cuda.memory_allocated() / gib:.2f}GiB "
+            f"reserved={torch.cuda.memory_reserved() / gib:.2f}GiB"
+        )
+
     def _restore_adapter_dtype(self) -> None:
         """DiffSynth-style H3 LoRAs inject fp32 factors; keep the DiT in bf16."""
         transformer = getattr(self.pipe, "transformer", None)
@@ -282,6 +322,8 @@ class MiniMaxH3Engine:
             return self._generate_unlocked(request)
 
     def _generate_unlocked(self, request: GenerationRequest) -> GenerationResult:
+        self._release_cuda_memory()
+        logger.info("CUDA before request: %s", self._cuda_memory_summary())
         spec = self.config.lora_by_id(request.lora_id)
         video_shift = request.video_shift if request.video_shift is not None else spec.video_shift
         audio_shift = request.audio_shift if request.audio_shift is not None else spec.audio_shift
@@ -334,27 +376,38 @@ class MiniMaxH3Engine:
         started = time.perf_counter()
         # ``no_grad`` is sufficient for inference and, unlike inference_mode,
         # does not permanently mark PEFT/offload tensors as inference-only.
-        with torch.no_grad():
-            result = self.pipe(
-                prompt=prompt,
-                height=height,
-                width=width,
-                num_frames=frames,
-                num_inference_steps=scheduler_grid_points,
-                generator=generator,
-                output_type="np",
-                output=["videos", "audio", "sampling_rate"],
-                **kwargs,
-            )
-        elapsed = time.perf_counter() - started
+        result = None
+        try:
+            with torch.no_grad():
+                result = self.pipe(
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    num_frames=frames,
+                    num_inference_steps=scheduler_grid_points,
+                    generator=generator,
+                    output_type="np",
+                    output=["videos", "audio", "sampling_rate"],
+                    **kwargs,
+                )
+            elapsed = time.perf_counter() - started
 
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{stamp}_{request.mode}_seed{request.seed}_{width}x{height}.mp4"
-        output_path = self.config.output_dir / filename
-        save_result_video(result, output_path, fps=self.config.fps)
-        del result
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"{stamp}_{request.mode}_seed{request.seed}_{width}x{height}.mp4"
+            output_path = self.config.output_dir / filename
+            save_result_video(result, output_path, fps=self.config.fps)
+        except torch.OutOfMemoryError as exc:
+            self.status = "CUDA OOM — memory released; retry with 544p or shorter duration"
+            logger.exception("CUDA OOM at %sx%s/%sf; %s", width, height, frames, self._cuda_memory_summary())
+            raise RuntimeError(
+                "CUDA ran out of memory. The engine released GPU components, so the app can be reused "
+                "without restarting. Retry with the 544p preset and 5 seconds, or increase "
+                "MINIMAX_H3_MEMORY_RESERVE_MARGIN."
+            ) from exc
+        finally:
+            del result
+            self._release_cuda_memory()
+            logger.info("CUDA after request: %s", self._cuda_memory_summary())
 
         self.status = "ready"
         return GenerationResult(

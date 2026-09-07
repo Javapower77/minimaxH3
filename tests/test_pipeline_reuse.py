@@ -65,3 +65,26 @@ def test_scale_change_reactivates_without_reloading_weights(tmp_path):
 
     assert len(engine.pipe.load_calls) == 1
     assert activations == [(('turbo',), (1.0,)), (('turbo',), (0.75,))]
+
+
+class _Hook:
+    def __init__(self):
+        self.model_id = "transformer"
+        self.calls = 0
+
+    def offload(self):
+        self.calls += 1
+
+
+class _Manager:
+    def __init__(self, hooks):
+        self.model_hooks = hooks
+
+
+def test_release_cuda_memory_offloads_all_managed_components(monkeypatch):
+    hooks = [_Hook(), _Hook()]
+    engine = MiniMaxH3Engine(AppConfig())
+    engine.components_manager = _Manager(hooks)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+    engine._release_cuda_memory()
+    assert [hook.calls for hook in hooks] == [1, 1]

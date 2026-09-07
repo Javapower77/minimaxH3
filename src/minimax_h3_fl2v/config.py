@@ -95,7 +95,7 @@ class AppConfig:
     device: str = "cuda"
     dtype: str = "bfloat16"
     cpu_offload: bool = True
-    memory_reserve_margin: str = "12GB"
+    memory_reserve_margin: str = "20GB"
     attention_backend: Optional[str] = "_flash_3"
     output_dir: Path = ROOT / "outputs"
     lora_dir: Path = ROOT / "models" / "loras"
@@ -185,7 +185,7 @@ def load_config(
         cpu_offload=_as_bool(os.getenv("MINIMAX_H3_CPU_OFFLOAD"), _as_bool(raw.get("cpu_offload"), True)),
         memory_reserve_margin=os.getenv(
             "MINIMAX_H3_MEMORY_RESERVE_MARGIN",
-            raw.get("memory_reserve_margin", "12GB"),
+            raw.get("memory_reserve_margin", "20GB"),
         ),
         attention_backend=_local_attention(
             os.getenv("MINIMAX_H3_ATTENTION_BACKEND", raw.get("attention_backend"))
