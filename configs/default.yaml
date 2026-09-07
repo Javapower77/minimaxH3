@@ -1,0 +1,40 @@
+# Default runtime for a single NVIDIA H100 80 GB (Azure NC40ads_H100_v5 / NCCadsH100v5).
+# Full bf16 MiniMax-H3 + Qwen3-VL-32B does not fit in 80 GB. CPU offload is required
+# unless you switch to a quantized transformer. See docs/AZURE_H100.md.
+# Inference is offline-only: local_dir must already contain the snapshot.
+
+model_id: MiniMaxAI/MiniMax-H3
+local_dir: models/MiniMax-H3
+workflow: fl2va
+device: cuda
+dtype: bfloat16
+
+# Official single-GPU recipe: ComponentsManager auto CPU offload.
+cpu_offload: true
+memory_reserve_margin: 12GB
+attention_backend: _flash_3
+
+output_dir: outputs
+lora_dir: models/loras
+upload_dir: uploads
+
+# Generation defaults — FL2VA Turbo 8-step v1.0 768p (LightX2V studio).
+default_lora_id: fl2va_turbo_8step_768p
+nfe: 8
+video_shift: 6.0
+audio_shift: 3.0
+lora_alpha: 128
+lora_scale: 1.0
+fuse_lora: false
+megapixels: 1.0
+aspect_ratio: "auto"
+duration_seconds: 5.0
+seed: 42
+fps: 24
+
+gradio:
+  server_name: 0.0.0.0
+  server_port: 7860
+  share: false
+  max_queue: 4
+  title: MiniMax-H3 FL2VA Studio
