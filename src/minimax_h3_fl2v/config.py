@@ -70,6 +70,8 @@ class GenerationRequest:
     nfe: int = 8
     seed: int = 42
     lora_id: str = "fl2va_turbo_8step_768p"
+    extra_loras: list[tuple[Path, float]] = field(default_factory=list)
+    # Deprecated single-extra compatibility used by the CLI.
     extra_lora_path: Optional[Path] = None
     extra_lora_scale: float = 1.0
     lora_scale: float = 1.0

@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from minimax_h3_fl2v.config import AppConfig
-from minimax_h3_fl2v.ui import _save_uploaded_lora, _stored_lora_choices
+from minimax_h3_fl2v.ui import (
+    MAX_SEED,
+    _resolve_seed,
+    _save_uploaded_lora,
+    _selected_extra_loras,
+    _stored_lora_choices,
+)
 
 
 def test_stored_lora_choices_include_local_safetensors(tmp_path):
@@ -25,3 +31,19 @@ def test_uploaded_lora_is_persisted_and_selected(tmp_path):
     assert (lora_dir / "custom.safetensors").read_bytes() == b"weights"
     assert update.value == str((lora_dir / "custom.safetensors").resolve())
     assert cleared is None
+
+
+def test_select_five_loras_with_independent_strengths(tmp_path):
+    paths = []
+    for index in range(5):
+        path = tmp_path / f"lora-{index}.safetensors"
+        path.write_bytes(b"x")
+        paths.append(str(path))
+    selected = _selected_extra_loras(paths, [0.2, 0.4, 0.6, 0.8, 1.0])
+    assert [scale for _, scale in selected] == [0.2, 0.4, 0.6, 0.8, 1.0]
+
+
+def test_seed_fixed_and_random_modes():
+    assert _resolve_seed("Fixed", 123456) == 123456
+    random_seed = _resolve_seed("Random each generation", 123456)
+    assert 0 <= random_seed <= MAX_SEED

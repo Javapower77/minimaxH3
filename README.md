@@ -123,7 +123,12 @@ minimaxH3/
 - Gradio keeps adapters **unfused** so you can swap LoRAs without reloading 60 GB.
 - Optional second `.safetensors` (style) stacks on the turbo adapter.
 - UI uploads are copied once to `models/loras/` and remain available in the
-  **Stored extra LoRA** dropdown. Use **Refresh** after copying a file there
+  five **Extra LoRA** dropdowns. Use **Refresh** after copying a file there
+  manually. Up to five local LoRAs can be stacked with independent strengths,
+  in addition to the selected catalog/Turbo adapter. Duplicate files are rejected.
+- **Random each generation** creates a fresh 63-bit seed for every run, displays
+  it after generation, and copies it into the Seed field. Switch the mode to
+  **Fixed** to reproduce a result with that seed.
   outside the UI.
 
 Details: [docs/LORA.md](docs/LORA.md).

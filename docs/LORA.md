@@ -80,6 +80,12 @@ replaced without reloading the 62 GB transformer.
 You can stack:
 
 1. Catalog turbo LoRA (`adapter_name=turbo`)
+2. Up to five persistent local SafeTensors (`adapter_name=extra_1` through
+	`extra_5`), each with an independent strength from `0.0` to `2.0`.
+
+The same file cannot occupy multiple slots or duplicate the active catalog
+adapter. Additional adapters increase host/GPU memory use and initial load time;
+begin with one or two and add more only when the visual combination warrants it.
 2. Extra uploaded `.safetensors` (`adapter_name=style`)
 
 Do **not** stack a Ref2VA LoRA onto the FL2VA transformer. Ref2VA uses
@@ -92,7 +98,8 @@ Do **not** stack a Ref2VA LoRA onto the FL2VA transformer. Ref2VA uses
 3. Add an entry to `configs/loras.yaml`.
 4. Restart Gradio.
 
-Or upload it in the UI as **Extra style LoRA** (no catalog edit).
+Or upload it in the UI; the file persists in `models/loras/` and becomes
+available in every **Extra LoRA** selector without a catalog edit.
 
 ## Fuse (CLI only)
 

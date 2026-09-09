@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import shutil
 import socket
 import threading
@@ -137,6 +138,42 @@ def _save_uploaded_lora(config: AppConfig, upload) -> tuple[gr.Dropdown, None]:
     )
 
 
+MAX_EXTRA_LORAS = 5
+MAX_SEED = 2**63 - 1
+
+
+def _resolve_seed(mode: str, value) -> int:
+    if str(mode).lower() == "random each generation":
+        return secrets.randbelow(MAX_SEED + 1)
+    try:
+        seed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise gr.Error("Fixed seed must be an integer.") from exc
+    if not 0 <= seed <= MAX_SEED:
+        raise gr.Error(f"Seed must be between 0 and {MAX_SEED}.")
+    return seed
+
+
+def _selected_extra_loras(paths: list, scales: list) -> list[tuple[Path, float]]:
+    selected: list[tuple[Path, float]] = []
+    seen: set[Path] = set()
+    for value, scale in zip(paths, scales):
+        path = _file_path(value)
+        if path is None:
+            continue
+        path = path.expanduser().resolve()
+        if path in seen:
+            raise gr.Error(f"LoRA selected more than once: {path.name}")
+        strength = float(scale)
+        if not 0.0 <= strength <= 2.0:
+            raise gr.Error(f"LoRA strength must be between 0 and 2: {path.name}")
+        seen.add(path)
+        selected.append((path, strength))
+    if len(selected) > MAX_EXTRA_LORAS:
+        raise gr.Error(f"At most {MAX_EXTRA_LORAS} extra LoRAs may be selected.")
+    return selected
+
+
 def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
     config = config or load_config()
     engine = get_engine(config)
@@ -154,15 +191,24 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
         first_image,
         last_image,
         lora_id,
-        stored_lora,
+        stored_lora_1,
+        stored_lora_2,
+        stored_lora_3,
+        stored_lora_4,
+        stored_lora_5,
         lora_upload,
         duration,
         preset,
         aspect_ratio,
         nfe,
+        seed_mode,
         seed,
         lora_scale,
-        extra_scale,
+        extra_scale_1,
+        extra_scale_2,
+        extra_scale_3,
+        extra_scale_4,
+        extra_scale_5,
         structured,
         progress=gr.Progress(track_tqdm=False),
     ):
@@ -172,13 +218,17 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             progress(0.05, desc="Loading MiniMax-H3…")
             engine.load()
 
-        extra_path = _file_path(stored_lora)
         uploaded = _file_path(lora_upload)
         if uploaded is not None:
             dest = config.lora_dir / uploaded.name
             if uploaded.resolve() != dest.resolve():
                 shutil.copy2(uploaded, dest)
-            extra_path = dest
+
+        extra_loras = _selected_extra_loras(
+            [stored_lora_1, stored_lora_2, stored_lora_3, stored_lora_4, stored_lora_5],
+            [extra_scale_1, extra_scale_2, extra_scale_3, extra_scale_4, extra_scale_5],
+        )
+        actual_seed = _resolve_seed(seed_mode, seed)
 
         has_reference = bool(first_image or last_image)
         if preset and preset in PRESET_LABELS:
@@ -202,10 +252,9 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             megapixels=float(megapixels),
             aspect_ratio=str(aspect_ratio),
             nfe=int(nfe),
-            seed=int(seed),
+            seed=actual_seed,
             lora_id=lora_id,
-            extra_lora_path=extra_path,
-            extra_lora_scale=float(extra_scale),
+            extra_loras=extra_loras,
             lora_scale=float(lora_scale),
             structured_prompt=bool(structured),
         )
@@ -218,7 +267,13 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             f"{result.elapsed_seconds:.1f}s  LoRA={result.lora}\n"
             f"{result.path}"
         )
-        return str(result.path), summary
+        seed_note = (
+            f"Random seed chosen: {result.seed}. It has been copied into the Seed field; "
+            "switch Seed mode to Fixed to reproduce this video."
+            if str(seed_mode).lower() == "random each generation"
+            else f"Fixed seed used: {result.seed}."
+        )
+        return str(result.path), summary, result.seed, seed_note
 
     theme = gr.themes.Soft(
         primary_hue="amber",
@@ -258,14 +313,28 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                     first_image = gr.Image(label="First frame (optional)", type="filepath")
                     last_image = gr.Image(label="Last frame (optional, FL2VA)", type="filepath")
                 with gr.Row():
-                    stored_lora = gr.Dropdown(
-                        choices=_stored_lora_choices(config),
-                        value=None,
-                        label="Stored extra LoRA",
-                        allow_custom_value=False,
-                        scale=5,
-                    )
                     refresh_loras = gr.Button("Refresh", scale=1)
+                stored_loras = []
+                extra_scales = []
+                for index in range(1, MAX_EXTRA_LORAS + 1):
+                    with gr.Row():
+                        stored = gr.Dropdown(
+                            choices=_stored_lora_choices(config),
+                            value=None,
+                            label=f"Extra LoRA {index}",
+                            allow_custom_value=False,
+                            scale=5,
+                        )
+                        strength = gr.Slider(
+                            0.0,
+                            2.0,
+                            value=0.8,
+                            step=0.05,
+                            label=f"Strength {index}",
+                            scale=2,
+                        )
+                    stored_loras.append(stored)
+                    extra_scales.append(strength)
                 lora_upload = gr.File(
                     label="Upload new LoRA once (saved into models/loras)",
                     file_types=[".safetensors"],
@@ -291,8 +360,17 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                 duration = gr.Slider(5.0, 15.0, value=5.0, step=0.5, label="Duration (seconds, snapped to 17n+5 frames)")
                 nfe = gr.Slider(4, 50, value=config.nfe, step=1, label="NFE (transformer steps)")
                 lora_scale = gr.Slider(0.0, 1.5, value=1.0, step=0.05, label="Turbo LoRA strength")
-                extra_scale = gr.Slider(0.0, 1.5, value=0.8, step=0.05, label="Extra LoRA strength")
-                seed = gr.Number(value=42, precision=0, label="Seed")
+                seed_mode = gr.Radio(
+                    choices=["Fixed", "Random each generation"],
+                    value="Fixed",
+                    label="Seed mode",
+                )
+                seed = gr.Number(value=config.seed, precision=0, label="Seed")
+                seed_note = gr.Textbox(
+                    value="Fixed seed will be reused.",
+                    label="Seed used",
+                    interactive=False,
+                )
                 run_btn = gr.Button("Generate video + audio", variant="primary")
 
         video = gr.Video(label="Output MP4 (H.264 + AAC)", autoplay=True)
@@ -308,13 +386,26 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             outputs=[nfe, lora_scale, lora_notes],
         )
         refresh_loras.click(
-            lambda: gr.Dropdown(choices=_stored_lora_choices(config)),
-            outputs=stored_lora,
+            lambda: tuple(
+                gr.Dropdown(choices=_stored_lora_choices(config))
+                for _ in range(MAX_EXTRA_LORAS)
+            ),
+            outputs=stored_loras,
         )
         lora_upload.upload(
             lambda upload: _save_uploaded_lora(config, upload),
             inputs=lora_upload,
-            outputs=[stored_lora, lora_upload],
+            outputs=[stored_loras[0], lora_upload],
+        )
+        seed_mode.change(
+            lambda mode: (
+                gr.Number(interactive=str(mode).lower() == "fixed"),
+                "Enter a repeatable seed."
+                if str(mode).lower() == "fixed"
+                else "A random seed will be generated and shown after each run.",
+            ),
+            inputs=seed_mode,
+            outputs=[seed, seed_note],
         )
 
         run_btn.click(
@@ -324,18 +415,19 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                 first_image,
                 last_image,
                 lora_id,
-                stored_lora,
+                *stored_loras,
                 lora_upload,
                 duration,
                 preset,
                 aspect_ratio,
                 nfe,
+                seed_mode,
                 seed,
                 lora_scale,
-                extra_scale,
+                *extra_scales,
                 structured,
             ],
-            outputs=[video, summary],
+            outputs=[video, summary, seed, seed_note],
         )
 
         gr.Markdown(
@@ -344,7 +436,8 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             "- A reference image controls the output ratio; only 32-pixel-grid rounding is applied. "
             "Frames are contained with padding, never cropped.\n"
             "- Turbo LoRAs are trained at **4–8 NFE**. Base model wants ~**50 NFE**.\n"
-            "- Uploaded LoRAs persist in `models/loras`; select them later from **Stored extra LoRA**.\n"
+            "- Stack up to **five** local LoRAs; each has an independent strength. Uploaded files persist in `models/loras`.\n"
+            "- Random seed mode shows the chosen seed and copies it into the Seed field for reproduction.\n"
             "- No Hub, no share tunnel, no safety checker. See `docs/AZURE_H100.md`."
         )
 

@@ -21,6 +21,7 @@ from typing import Optional
 
 import torch
 from peft import LoraConfig
+from safetensors import safe_open
 from safetensors.torch import load_file as load_safetensors_file
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,44 @@ LORA_TARGET_MODULES = (
 )
 LORA_A_SUFFIX = ".lora_A.default.weight"
 LORA_B_SUFFIX = ".lora_B.default.weight"
+
+
+def lora_metadata(path: Path) -> dict[str, str]:
+    """Read SafeTensors metadata without loading the adapter tensors."""
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"LoRA checkpoint does not exist: {path}")
+    if path.suffix.lower() != ".safetensors":
+        raise ValueError(f"{path.name} is not a SafeTensors LoRA file")
+    with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
+        return {str(key): str(value) for key, value in (checkpoint.metadata() or {}).items()}
+
+
+def validate_lora_workflow(path: Path, workflow: str) -> None:
+    """Reject adapters explicitly trained for another H3 task transformer.
+
+    FL2VA and Ref2VA are separate H3 checkpoints. Their similarly named layers
+    have different dimensions, so PEFT cannot load or combine their adapters.
+    AI-Toolkit LoRAs commonly identify this in ``ss_base_model_version``.
+    """
+    metadata = lora_metadata(path)
+    identity = " ".join(
+        metadata.get(key, "")
+        for key in ("ss_base_model_version", "base_model", "name", "ss_output_name")
+    ).lower()
+    selected = str(workflow).lower()
+    is_ref2va = "ref2va" in identity or "ref2v" in identity
+    is_fl2va = "fl2va" in identity or "fl2v" in identity
+    if selected.startswith("fl2") and is_ref2va:
+        raise ValueError(
+            f"{path.name} was trained for MiniMax-H3 Ref2VA, but this app is using the "
+            "FL2VA transformer. Ref2VA and FL2VA LoRAs cannot be stacked because their "
+            "layer dimensions differ. Select an FL2VA-compatible LoRA instead."
+        )
+    if selected.startswith("ref2") and is_fl2va:
+        raise ValueError(
+            f"{path.name} was trained for MiniMax-H3 FL2VA, but the active workflow is Ref2VA."
+        )
 
 
 @dataclass(frozen=True)

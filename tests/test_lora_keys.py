@@ -1,6 +1,13 @@
 import torch
+from safetensors.torch import save_file
 
-from minimax_h3_fl2v.lora import LORA_A_SUFFIX, LORA_B_SUFFIX, _normalize_keys, _validate_state_dict
+from minimax_h3_fl2v.lora import (
+    LORA_A_SUFFIX,
+    LORA_B_SUFFIX,
+    _normalize_keys,
+    _validate_state_dict,
+    validate_lora_workflow,
+)
 
 
 def test_normalize_peft_prefixes():
@@ -42,3 +49,30 @@ def test_reject_comfyui_keys():
         assert "ComfyUI" in str(exc)
     else:
         raise AssertionError("expected ComfyUI LoRA rejection")
+
+
+def test_reject_ref2va_lora_in_fl2va_workflow(tmp_path):
+    path = tmp_path / "sharpness.safetensors"
+    save_file(
+        {"diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight": torch.zeros(4, 8)},
+        path,
+        metadata={"ss_base_model_version": "minimax_h3_ref2va"},
+    )
+    try:
+        validate_lora_workflow(path, "fl2va")
+    except ValueError as exc:
+        assert "Ref2VA" in str(exc)
+        assert "FL2VA" in str(exc)
+        assert "cannot be stacked" in str(exc)
+    else:
+        raise AssertionError("expected Ref2VA LoRA rejection")
+
+
+def test_allow_generic_lora_in_fl2va_workflow(tmp_path):
+    path = tmp_path / "style.safetensors"
+    save_file(
+        {"transformer_blocks.0.attn.to_q.lora_A.weight": torch.zeros(4, 8)},
+        path,
+        metadata={"ss_base_model_version": "minimax_h3"},
+    )
+    validate_lora_workflow(path, "fl2va")

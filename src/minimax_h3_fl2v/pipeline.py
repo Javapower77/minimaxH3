@@ -14,7 +14,7 @@ import torch
 
 from .config import AppConfig, GenerationRequest, LoRASpec
 from .frames import duration_to_frames, frames_to_duration
-from .lora import LoadedLoRA
+from .lora import LoadedLoRA, validate_lora_workflow
 from .media import fit_image_without_crop, load_rgb_image, save_result_video
 from .offline import (
     disable_safety_guards,
@@ -244,8 +244,7 @@ class MiniMaxH3Engine:
         spec: LoRASpec,
         *,
         scale: Optional[float] = None,
-        extra_path: Optional[Path] = None,
-        extra_scale: float = 1.0,
+        extra_loras: Optional[list[tuple[Path, float]]] = None,
     ) -> str:
         if self.pipe is None:
             raise RuntimeError("Pipeline is not loaded")
@@ -261,26 +260,57 @@ class MiniMaxH3Engine:
                 )
             desired["turbo"] = path.expanduser().resolve()
             weights["turbo"] = float(turbo_scale)
-        if extra_path:
+        extras = list(extra_loras or [])
+        if len(extras) > 5:
+            raise ValueError("At most five extra LoRAs can be applied at once")
+        # Prevent applying the same file twice (including selecting the active
+        # catalog Turbo file again in one of the five extra slots).
+        seen: set[Path] = set(desired.values())
+        for index, (extra_path, extra_scale) in enumerate(extras, start=1):
             extra = Path(extra_path).expanduser().resolve()
             if not extra.is_file():
                 raise FileNotFoundError(f"Extra LoRA file missing: {extra}")
-            desired["style"] = extra
-            weights["style"] = float(extra_scale)
+            if extra in seen:
+                raise ValueError(f"Extra LoRA selected more than once: {extra.name}")
+            seen.add(extra)
+            adapter_name = f"extra_{index}"
+            desired[adapter_name] = extra
+            weights[adapter_name] = float(extra_scale)
+
+        # Validate every file before unload_lora_weights mutates the currently
+        # working adapter set. H3 FL2VA and Ref2VA LoRAs are not interchangeable.
+        for path in desired.values():
+            validate_lora_workflow(path, self.config.workflow)
 
         reloaded = desired != self._loaded_adapters
         if reloaded:
             if hasattr(self.pipe, "unload_lora_weights"):
                 self.pipe.unload_lora_weights()
             self._loaded_adapters = {}
-            for adapter_name, path in desired.items():
-                logger.info("Loading LoRA adapter=%s path=%s", adapter_name, path)
-                self.pipe.load_lora_weights(
-                    str(path),
-                    adapter_name=adapter_name,
-                    local_files_only=True,
-                )
-                self._loaded_adapters[adapter_name] = path
+            try:
+                for adapter_name, path in desired.items():
+                    logger.info("Loading LoRA adapter=%s path=%s", adapter_name, path)
+                    self.pipe.load_lora_weights(
+                        str(path),
+                        adapter_name=adapter_name,
+                        local_files_only=True,
+                    )
+                    self._loaded_adapters[adapter_name] = path
+            except Exception as exc:
+                # PEFT may leave a partially injected adapter after a shape or
+                # key mismatch. Remove it so the next request can reload safely.
+                if hasattr(self.pipe, "unload_lora_weights"):
+                    try:
+                        self.pipe.unload_lora_weights()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Could not clean up a partially loaded LoRA")
+                self._loaded_adapters = {}
+                self._active_adapter_names = ()
+                self._active_adapter_weights = ()
+                raise ValueError(
+                    f"Could not load LoRA {path.name}. It is not compatible with the active "
+                    f"MiniMax-H3 {self.config.workflow.upper()} transformer: {exc}"
+                ) from exc
             self._restore_adapter_dtype()
             self._active_adapter_names = ()
             self._active_adapter_weights = ()
@@ -335,8 +365,15 @@ class MiniMaxH3Engine:
         self.apply_lora(
             spec,
             scale=request.lora_scale,
-            extra_path=request.extra_lora_path,
-            extra_scale=request.extra_lora_scale,
+            extra_loras=(
+                request.extra_loras
+                if request.extra_loras
+                else (
+                    [(request.extra_lora_path, request.extra_lora_scale)]
+                    if request.extra_lora_path is not None
+                    else []
+                )
+            ),
         )
 
         first = load_rgb_image(request.first_image) if request.first_image else None
