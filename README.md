@@ -129,6 +129,14 @@ minimaxH3/
 - **Random each generation** creates a fresh 63-bit seed for every run, displays
   it after generation, and copies it into the Seed field. Switch the mode to
   **Fixed** to reproduce a result with that seed.
+- The Dasiwa Turbo Multistep catalog entries automatically use an isolated local
+  ComfyUI worker with the matching pruned FL2VA base. Run
+  `python scripts/setup_pruned_backend.py` once while online to install or repair
+  that backend; normal catalog entries continue using Diffusers.
+- Both backends report live model/LoRA loading, prompt and keyframe encoding,
+  sampling step and percentage, elapsed time, VAE decoding, and MP4 encoding.
+  The final summary records end-to-end generation time, realtime factor,
+  frames/second, and a per-stage timing breakdown for parameter comparisons.
   outside the UI.
 
 Details: [docs/LORA.md](docs/LORA.md).

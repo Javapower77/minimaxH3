@@ -6,9 +6,9 @@ import gc
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -55,6 +55,37 @@ class GenerationResult:
     elapsed_seconds: float
     lora: str
     prompt: str
+    timings: dict[str, float] = field(default_factory=dict)
+
+
+ProgressCallback = Callable[[float, str], None]
+
+
+class _ProgressBridge:
+    """Tiny tqdm-compatible bridge used by Diffusers' denoise block."""
+
+    def __init__(self, total: int, callback: ProgressCallback, started: float):
+        self.total = max(1, int(total))
+        self.current = 0
+        self.callback = callback
+        self.started = started
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type is None:
+            elapsed = time.perf_counter() - self.started
+            self.callback(0.82, f"🧩 Sampling complete · {elapsed:.1f}s · decoding video/audio…")
+
+    def update(self, amount: int = 1):
+        self.current = min(self.total, self.current + int(amount))
+        elapsed = time.perf_counter() - self.started
+        fraction = self.current / self.total
+        self.callback(
+            0.22 + 0.58 * fraction,
+            f"⚡ Sampling step {self.current}/{self.total} · {fraction * 100:.0f}% · elapsed {elapsed:.1f}s",
+        )
 
 
 class MiniMaxH3Engine:
@@ -169,6 +200,29 @@ class MiniMaxH3Engine:
                 logger.warning("Attention backend %s unavailable (%s)", name, exc)
         logger.warning("Falling back to default SDPA attention (%s)", last_error)
 
+    def _install_denoise_progress(
+        self,
+        callback: ProgressCallback,
+        started: float,
+    ) -> tuple[object | None, object | None]:
+        """Install detailed step reporting on MiniMax's modular denoise block."""
+        blocks = getattr(getattr(self.pipe, "blocks", None), "sub_blocks", {})
+        denoise_block = next(
+            (block for name, block in blocks.items() if name == "denoise.denoise"),
+            None,
+        )
+        original = getattr(denoise_block, "progress_bar", None)
+        if denoise_block is not None:
+            denoise_block.progress_bar = lambda iterable=None, total=None: _ProgressBridge(
+                total if total is not None else len(iterable), callback, started
+            )
+        return denoise_block, original
+
+    @staticmethod
+    def _restore_denoise_progress(denoise_block, original) -> None:
+        if denoise_block is not None and original is not None:
+            denoise_block.progress_bar = original
+
     def _release_cuda_memory(self, *, offload_components: bool = True) -> None:
         """Return resident pipeline components and stale allocations to CPU.
 
@@ -245,7 +299,9 @@ class MiniMaxH3Engine:
         *,
         scale: Optional[float] = None,
         extra_loras: Optional[list[tuple[Path, float]]] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> str:
+        report = progress_callback or (lambda fraction, message: None)
         if self.pipe is None:
             raise RuntimeError("Pipeline is not loaded")
 
@@ -288,7 +344,12 @@ class MiniMaxH3Engine:
                 self.pipe.unload_lora_weights()
             self._loaded_adapters = {}
             try:
-                for adapter_name, path in desired.items():
+                total_adapters = max(1, len(desired))
+                for adapter_index, (adapter_name, path) in enumerate(desired.items(), start=1):
+                    report(
+                        0.10 + 0.04 * adapter_index / total_adapters,
+                        f"🧬 Loading LoRA {adapter_index}/{total_adapters}: {path.name}",
+                    )
                     logger.info("Loading LoRA adapter=%s path=%s", adapter_name, path)
                     self.pipe.load_lora_weights(
                         str(path),
@@ -345,13 +406,44 @@ class MiniMaxH3Engine:
         self._active_adapter_weights = ()
         return "base"
 
-    def generate(self, request: GenerationRequest) -> GenerationResult:
+    def generate(
+        self,
+        request: GenerationRequest,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> GenerationResult:
+        report = progress_callback or (lambda fraction, message: None)
+        spec = self.config.lora_by_id(request.lora_id)
+        if spec.backend == "comfy_pruned":
+            with self._lock:
+                from .comfy_backend import PrunedComfyBackend
+
+                report(0.02, "🟣 Pruned backend · releasing Diffusers GPU memory…")
+                self._release_cuda_memory()
+                self.status = "generating with pruned FL2VA backend"
+                try:
+                    result = PrunedComfyBackend(self.config).generate(
+                        request, spec, progress_callback=report
+                    )
+                    self.status = "ready"
+                    return result
+                except Exception:
+                    self.status = "pruned backend generation failed"
+                    raise
         if not self.ready:
+            report(0.03, "🔵 Loading full Diffusers MiniMax-H3 components…")
             self.load()
         with self._lock:
-            return self._generate_unlocked(request)
+            return self._generate_unlocked(request, progress_callback=report)
 
-    def _generate_unlocked(self, request: GenerationRequest) -> GenerationResult:
+    def _generate_unlocked(
+        self,
+        request: GenerationRequest,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> GenerationResult:
+        report = progress_callback or (lambda fraction, message: None)
+        overall_started = time.perf_counter()
+        timings: dict[str, float] = {}
+        report(0.06, "🧹 Preparing full-model backend · clearing GPU cache…")
         self._release_cuda_memory()
         logger.info("CUDA before request: %s", self._cuda_memory_summary())
         spec = self.config.lora_by_id(request.lora_id)
@@ -362,9 +454,12 @@ class MiniMaxH3Engine:
 
         self.pipe.scheduler.set_shift(video_shift)
         self.pipe.audio_scheduler.set_shift(audio_shift)
+        stage_started = time.perf_counter()
+        report(0.10, "🧬 Validating and loading catalog/extra LoRA adapters…")
         self.apply_lora(
             spec,
             scale=request.lora_scale,
+            progress_callback=report,
             extra_loras=(
                 request.extra_loras
                 if request.extra_loras
@@ -375,6 +470,7 @@ class MiniMaxH3Engine:
                 )
             ),
         )
+        timings["lora_load"] = time.perf_counter() - stage_started
 
         first = load_rgb_image(request.first_image) if request.first_image else None
         last = load_rgb_image(request.last_image) if request.last_image else None
@@ -411,6 +507,11 @@ class MiniMaxH3Engine:
 
         self.status = f"generating {request.mode} {width}x{height} {frames}f nfe={nfe}"
         started = time.perf_counter()
+        report(
+            0.16,
+            f"🖼️ Encoding prompt/keyframes · {request.mode.upper()} · {width}×{height} · {frames} frames",
+        )
+        denoise_block, original_progress_bar = self._install_denoise_progress(report, started)
         # ``no_grad`` is sufficient for inference and, unlike inference_mode,
         # does not permanently mark PEFT/offload tensors as inference-only.
         result = None
@@ -429,10 +530,13 @@ class MiniMaxH3Engine:
                 )
             elapsed = time.perf_counter() - started
 
+            report(0.92, f"🎞️ Encoding H.264 + AAC MP4 · elapsed {elapsed:.1f}s…")
+            encode_started = time.perf_counter()
             stamp = time.strftime("%Y%m%d-%H%M%S")
             filename = f"{stamp}_{request.mode}_seed{request.seed}_{width}x{height}.mp4"
             output_path = self.config.output_dir / filename
             save_result_video(result, output_path, fps=self.config.fps)
+            timings["mp4_encode"] = time.perf_counter() - encode_started
         except torch.OutOfMemoryError as exc:
             self.status = "CUDA OOM — memory released; retry with 544p or shorter duration"
             logger.exception("CUDA OOM at %sx%s/%sf; %s", width, height, frames, self._cuda_memory_summary())
@@ -442,11 +546,15 @@ class MiniMaxH3Engine:
                 "MINIMAX_H3_MEMORY_RESERVE_MARGIN."
             ) from exc
         finally:
+            self._restore_denoise_progress(denoise_block, original_progress_bar)
             del result
             self._release_cuda_memory()
             logger.info("CUDA after request: %s", self._cuda_memory_summary())
 
         self.status = "ready"
+        timings["pipeline"] = elapsed
+        timings["total"] = time.perf_counter() - overall_started
+        report(1.0, f"✅ Complete · total {timings['total']:.1f}s · saved {output_path.name}")
         return GenerationResult(
             path=output_path,
             mode=request.mode,
@@ -456,9 +564,10 @@ class MiniMaxH3Engine:
             duration=frames_to_duration(frames, self.config.fps),
             seed=int(request.seed),
             nfe=int(nfe),
-            elapsed_seconds=elapsed,
+            elapsed_seconds=timings["total"],
             lora=spec.name,
             prompt=prompt,
+            timings=timings,
         )
 
 

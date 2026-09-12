@@ -61,10 +61,53 @@ adapter plus whatever alpha the official loader applied.
 | `fl2va_turbo_8step` | `minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors` | 8 | 8 | 0.5 MP |
 | `fl2va_turbo_4step_v01` | `minimax_h3_fl2v_turbo_4step_v0.1.safetensors` | 4 | 8 | 0.5 MP |
 | `larryvrh_turbo_v4` | `minimax_h3_turbo_v4_step600_ema.safetensors` | 6 | 8 | 1.0 MP |
+| `dasiwa_multistep_r48_pruned` | `minimax_h3_fl2va_bf16_turbo_multistep_fro099_r48_pruned.safetensors` | 8 | dynamic/r48 | 1.0 MP |
+| `dasiwa_multistep_r96_pruned` | `minimax_h3_fl2va_bf16_turbo_multistep_fro099_r96_pruned.safetensors` | 8 | dynamic/r96 | 1.0 MP |
+| `dasiwa_multistep_r144_pruned` | `minimax_h3_fl2va_bf16_turbo_multistep_fro099_r144_pruned.safetensors` | 8 | dynamic/r144 | 1.0 MP |
+| `dasiwa_multistep_r512_pruned` | `minimax_h3_fl2va_bf16_turbo_multistep_fro099_r512_pruned.safetensors` | 8 | dynamic/r512 | 1.0 MP |
 | `none` | — | 50 | — | 1.0 MP |
 
 Hub: [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo)
 and [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora).
+
+### Civitai Turbo Multistep v1 architecture notice
+
+The four Dasiwa entries come from Civitai model version `3315815`. The creator
+recommends Euler/simple at 4–8 NFE, with 8 NFE preferred. These files declare
+`output_mode=pruned`, `adaln_target_width=8`, and contain direct `diff`/`diff_b`
+AdaLN patches. Selecting one automatically routes generation to the isolated
+local ComfyUI backend and its matching
+`minimax_h3_fl2va_pruned_bf16.safetensors` base. Standard catalog entries keep
+using the original Diffusers backend.
+
+Install or repair this backend while online with:
+
+```bash
+source .venv/bin/activate
+python scripts/setup_pruned_backend.py
+```
+
+The worker is installed under `.runtime/ComfyUI`, listens only on
+`127.0.0.1:8188`, starts automatically when a pruned entry is selected, and
+supports text, first-frame, last-frame, and first+last-frame FL2VA generation.
+It uses Euler/simple and unloads its models after each request to return VRAM.
+Only LoRAs compatible with the pruned 8-wide AdaLN architecture may be stacked
+with these entries.
+
+Before every pruned request, the selected catalog and extra LoRA files are
+atomically linked from `models/loras/` into the worker's model directory and
+checked against its live `/models/loras` list. Newly uploaded or copied LoRAs
+therefore become available without reinstalling or restarting the worker.
+
+Installed backend components are the 40.2 GB pruned BF16 FL2VA transformer,
+Qwen3-VL-32B NVFP4 text encoder, FP16 video VAE, and FP32 audio VAE from
+`Comfy-Org/MiniMax-H3`. ComfyUI is pinned to the revision tested by the setup
+script. A real five-frame smoke render with the rank-48 adapter is used to
+validate model loading, mixed LoRA patches, sampling, both VAEs, and MP4 muxing.
+
+Locally verified Civitai SHA-256 checksums for ranks 48, 96, 144, and 512 match
+the publisher. The rank-512 file is `5,136,520,680` bytes and has SHA-256
+`70F1A59B130162CB15E5D9DB8ACFA227A4C460405ED31882B215A570E1BCBCD2`.
 
 ## Scheduler grid
 

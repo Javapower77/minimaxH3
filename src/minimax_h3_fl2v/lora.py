@@ -21,7 +21,7 @@ from typing import Optional
 
 import torch
 from peft import LoraConfig
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from safetensors.torch import load_file as load_safetensors_file
 
 logger = logging.getLogger(__name__)
@@ -45,8 +45,14 @@ def lora_metadata(path: Path) -> dict[str, str]:
         raise FileNotFoundError(f"LoRA checkpoint does not exist: {path}")
     if path.suffix.lower() != ".safetensors":
         raise ValueError(f"{path.name} is not a SafeTensors LoRA file")
-    with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
-        return {str(key): str(value) for key, value in (checkpoint.metadata() or {}).items()}
+    try:
+        with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
+            return {str(key): str(value) for key, value in (checkpoint.metadata() or {}).items()}
+    except SafetensorError as exc:
+        raise ValueError(
+            f"{path.name} is incomplete or corrupt and cannot be read as SafeTensors. "
+            "Download the file again and verify its SHA-256 checksum."
+        ) from exc
 
 
 def validate_lora_workflow(path: Path, workflow: str) -> None:
@@ -57,6 +63,16 @@ def validate_lora_workflow(path: Path, workflow: str) -> None:
     AI-Toolkit LoRAs commonly identify this in ``ss_base_model_version``.
     """
     metadata = lora_metadata(path)
+    output_mode = metadata.get("output_mode", "").strip().lower()
+    adaln_target_width = metadata.get("adaln_target_width", "").strip()
+    adaln_target = metadata.get("adaln_target", "").strip().lower()
+    if output_mode == "pruned" or adaln_target_width == "8" or "pruned" in adaln_target:
+        raise ValueError(
+            f"{path.name} targets the pruned MiniMax-H3 architecture (8-wide AdaLN), "
+            "but this app currently loads the full Diffusers FL2VA transformer "
+            "(2688-wide AdaLN). This adapter cannot be applied safely. Use a full/non-pruned "
+            "version of the LoRA, or run it with its matching pruned base checkpoint."
+        )
     identity = " ".join(
         metadata.get(key, "")
         for key in ("ss_base_model_version", "base_model", "name", "ss_output_name")
@@ -74,6 +90,30 @@ def validate_lora_workflow(path: Path, workflow: str) -> None:
         raise ValueError(
             f"{path.name} was trained for MiniMax-H3 FL2VA, but the active workflow is Ref2VA."
         )
+
+
+def validate_pruned_fl2va_lora(path: Path) -> None:
+    """Validate an adapter before sending it to the pruned FL2VA worker."""
+    metadata = lora_metadata(path)
+    identity = " ".join(
+        metadata.get(key, "")
+        for key in ("ss_base_model_version", "base_model", "name", "ss_output_name")
+    ).lower()
+    if "ref2va" in identity or "ref2v" in identity:
+        raise ValueError(f"{path.name} is a Ref2VA adapter and cannot be used with pruned FL2VA.")
+    with safe_open(str(Path(path).expanduser().resolve()), framework="pt", device="cpu") as checkpoint:
+        for key in checkpoint.keys():
+            lower = key.lower()
+            if "adaln" not in lower or not (
+                key.endswith(".lora_A.weight") or key.endswith(".lora_down.weight")
+            ):
+                continue
+            shape = tuple(checkpoint.get_slice(key).get_shape())
+            if len(shape) == 2 and shape[1] != 8:
+                raise ValueError(
+                    f"{path.name} contains a full-model AdaLN adapter with input width {shape[1]}; "
+                    "the pruned FL2VA backend requires width 8."
+                )
 
 
 @dataclass(frozen=True)

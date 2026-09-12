@@ -90,6 +90,47 @@ CSS = """
 .gradio-container { font-family: "IBM Plex Sans", "Segoe UI", sans-serif; }
 #title-block h1 { letter-spacing: 0.04em; font-weight: 650; }
 .hint { color: #9aa3b2; font-size: 0.92rem; }
+.progress-bar-wrap {
+    padding: 12px 16px !important;
+    border: 1px solid rgba(148, 163, 184, 0.38) !important;
+    border-radius: 12px !important;
+    background: rgba(2, 6, 23, 0.94) !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38) !important;
+}
+.progress-bar-wrap,
+.progress-bar-wrap *,
+.progress-text,
+.progress-text *,
+.eta-bar,
+.eta-bar *,
+.progress-level,
+.progress-level * {
+    color: #ffffff !important;
+    opacity: 1 !important;
+    -webkit-text-fill-color: #ffffff !important;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95) !important;
+}
+.progress-text {
+    font-size: 14px !important;
+    line-height: 1.45 !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.01em !important;
+}
+.eta-bar {
+    font-size: 13px !important;
+    font-weight: 750 !important;
+}
+.progress-bar { height: 16px !important; border-radius: 999px !important; overflow: hidden; }
+.progress-level {
+    background: rgba(255, 255, 255, 0.18) !important;
+    border-radius: 999px !important;
+}
+.progress-level-inner,
+.progress-bar > div {
+    background: linear-gradient(90deg, #7c3aed, #06b6d4, #22c55e) !important;
+    box-shadow: 0 0 18px rgba(6, 182, 212, 0.55);
+}
+#run-summary textarea { font-family: "IBM Plex Mono", "Cascadia Mono", monospace; }
 """
 
 
@@ -174,6 +215,61 @@ def _selected_extra_loras(paths: list, scales: list) -> list[tuple[Path, float]]
     return selected
 
 
+def _lora_slot_updates(count) -> tuple:
+    """Show exactly the requested number of additional LoRA rows."""
+    try:
+        selected_count = max(0, min(MAX_EXTRA_LORAS, int(count)))
+    except (TypeError, ValueError):
+        selected_count = 0
+    return tuple(gr.update(visible=index < selected_count) for index in range(MAX_EXTRA_LORAS))
+
+
+def _lora_guidance(config: AppConfig, lora_id: str, count=0, *scales) -> str:
+    """Return concise schedule, strength, and compatibility guidance."""
+    spec = config.lora_by_id(lora_id)
+    try:
+        selected_count = int(count)
+    except (TypeError, ValueError):
+        selected_count = 0
+    active_scales = [float(value) for value in scales[:selected_count] if value is not None]
+    warnings: list[str] = []
+    if any(value > 1.2 for value in active_scales):
+        warnings.append("⚠️ Extra strength above 1.2 can overpower identity, motion, or anatomy.")
+    if selected_count >= 4:
+        warnings.append("⚠️ Four or five stacked LoRAs substantially increase load time and conflict risk.")
+    backend = (
+        "**Pruned backend:** only 8-wide pruned-compatible extra LoRAs may be stacked."
+        if spec.backend == "comfy_pruned"
+        else "**Diffusers backend:** use FL2VA PEFT SafeTensors; Ref2VA/pruned adapters are incompatible."
+    )
+    schedule = (
+        f"**Recommended:** NFE **{spec.nfe}**, Turbo strength **{spec.lora_scale:g}**, "
+        f"video/audio shift **{spec.video_shift:g}/{spec.audio_shift:g}**."
+    )
+    strength = (
+        "For extra LoRAs, begin at **0.2–0.5**, test one at a time with a fixed seed, "
+        "then increase gradually."
+    )
+    warning_text = "\n\n" + "  \n".join(warnings) if warnings else ""
+    return f"{schedule}  \n{backend}  \n{strength}{warning_text}"
+
+
+def _recommended_reset_values(config: AppConfig) -> tuple:
+    """Values returned by the UI's reset-to-recommended-defaults action."""
+    spec = config.lora_by_id(config.default_lora_id)
+    return (
+        "", None, None, config.default_lora_id, 0,
+        *([None] * MAX_EXTRA_LORAS),
+        None, "768p 16:9 (recommended)", "match reference (no crop)",
+        5.0, spec.nfe, "Fixed", config.seed, spec.lora_scale,
+        *([0.8] * MAX_EXTRA_LORAS),
+        True,
+        spec.notes,
+        _lora_guidance(config, spec.id, 0),
+        "Fixed seed will be reused.",
+    )
+
+
 def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
     config = config or load_config()
     engine = get_engine(config)
@@ -191,6 +287,7 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
         first_image,
         last_image,
         lora_id,
+        extra_lora_count,
         stored_lora_1,
         stored_lora_2,
         stored_lora_3,
@@ -214,7 +311,8 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
     ):
         if not prompt or not str(prompt).strip():
             raise gr.Error("Prompt is required.")
-        if not engine.ready:
+        selected_spec = config.lora_by_id(lora_id)
+        if not engine.ready and selected_spec.backend != "comfy_pruned":
             progress(0.05, desc="Loading MiniMax-H3…")
             engine.load()
 
@@ -224,9 +322,14 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             if uploaded.resolve() != dest.resolve():
                 shutil.copy2(uploaded, dest)
 
+        selected_count = max(0, min(MAX_EXTRA_LORAS, int(extra_lora_count)))
         extra_loras = _selected_extra_loras(
-            [stored_lora_1, stored_lora_2, stored_lora_3, stored_lora_4, stored_lora_5],
-            [extra_scale_1, extra_scale_2, extra_scale_3, extra_scale_4, extra_scale_5],
+            [stored_lora_1, stored_lora_2, stored_lora_3, stored_lora_4, stored_lora_5][
+                :selected_count
+            ],
+            [extra_scale_1, extra_scale_2, extra_scale_3, extra_scale_4, extra_scale_5][
+                :selected_count
+            ],
         )
         actual_seed = _resolve_seed(seed_mode, seed)
 
@@ -258,13 +361,32 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             lora_scale=float(lora_scale),
             structured_prompt=bool(structured),
         )
-        progress(0.15, desc=f"{describe_mode(first_image, last_image)} · sampling")
-        result = engine.generate(request)
+        progress(0.01, desc=f"🚀 Starting {describe_mode(first_image, last_image)} generation…")
+
+        def report(fraction: float, message: str) -> None:
+            progress(max(0.0, min(1.0, float(fraction))), desc=message)
+
+        result = engine.generate(request, progress_callback=report)
+        generated_seconds = max(result.duration, 0.001)
+        real_time_factor = result.elapsed_seconds / generated_seconds
+        timing_text = ""
+        if result.timings:
+            useful = [
+                f"{name.replace('_', ' ')}={seconds:.1f}s"
+                for name, seconds in result.timings.items()
+                if name != "total" and seconds >= 0.05
+            ]
+            if useful:
+                timing_text = "\nStages: " + " · ".join(useful)
         summary = (
             f"{result.mode.upper()}  {result.width}×{result.height}  "
             f"{result.frames} frames ({result.duration:.2f}s)  "
             f"NFE={result.nfe}  seed={result.seed}  "
-            f"{result.elapsed_seconds:.1f}s  LoRA={result.lora}\n"
+            f"LoRA={result.lora}\n"
+            f"Generation: {result.elapsed_seconds:.1f}s  ·  "
+            f"{real_time_factor:.2f}× realtime  ·  "
+            f"{result.frames / max(result.elapsed_seconds, 0.001):.2f} frames/s"
+            f"{timing_text}\n"
             f"{result.path}"
         )
         seed_note = (
@@ -308,16 +430,23 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                         "Rain hiss, distant traffic, heels on wet concrete, no score."
                     ),
                 )
-                structured = gr.Checkbox(value=True, label="Wrap as H3-Context-IR (vision + soundscape + music)")
                 with gr.Row():
                     first_image = gr.Image(label="First frame (optional)", type="filepath")
                     last_image = gr.Image(label="Last frame (optional, FL2VA)", type="filepath")
                 with gr.Row():
                     refresh_loras = gr.Button("Refresh", scale=1)
+                    extra_lora_count = gr.Dropdown(
+                        choices=list(range(MAX_EXTRA_LORAS + 1)),
+                        value=0,
+                        label="Additional LoRAs",
+                        info="Select how many independent LoRA slots to enable (0–5).",
+                        scale=2,
+                    )
                 stored_loras = []
                 extra_scales = []
+                lora_rows = []
                 for index in range(1, MAX_EXTRA_LORAS + 1):
-                    with gr.Row():
+                    with gr.Row(visible=False) as lora_row:
                         stored = gr.Dropdown(
                             choices=_stored_lora_choices(config),
                             value=None,
@@ -335,6 +464,7 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                         )
                     stored_loras.append(stored)
                     extra_scales.append(strength)
+                    lora_rows.append(lora_row)
                 lora_upload = gr.File(
                     label="Upload new LoRA once (saved into models/loras)",
                     file_types=[".safetensors"],
@@ -347,6 +477,10 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                     label="Turbo / catalog LoRA",
                 )
                 lora_notes = gr.Markdown(value=config.lora_by_id(config.default_lora_id).notes)
+                lora_help = gr.Markdown(
+                    value=_lora_guidance(config, config.default_lora_id, 0),
+                    elem_classes=["hint"],
+                )
                 preset = gr.Dropdown(
                     choices=list(PRESET_LABELS.keys()),
                     value="768p 16:9 (recommended)",
@@ -358,33 +492,74 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                     label="Aspect ratio",
                 )
                 duration = gr.Slider(5.0, 15.0, value=5.0, step=0.5, label="Duration (seconds, snapped to 17n+5 frames)")
-                nfe = gr.Slider(4, 50, value=config.nfe, step=1, label="NFE (transformer steps)")
-                lora_scale = gr.Slider(0.0, 1.5, value=1.0, step=0.05, label="Turbo LoRA strength")
-                seed_mode = gr.Radio(
-                    choices=["Fixed", "Random each generation"],
-                    value="Fixed",
-                    label="Seed mode",
-                )
-                seed = gr.Number(value=config.seed, precision=0, label="Seed")
-                seed_note = gr.Textbox(
-                    value="Fixed seed will be reused.",
-                    label="Seed used",
-                    interactive=False,
-                )
+                with gr.Accordion("Advanced settings", open=False):
+                    structured = gr.Checkbox(
+                        value=True,
+                        label="Wrap prompt as H3-Context-IR (vision + soundscape + music)",
+                    )
+                    nfe = gr.Slider(
+                        4,
+                        50,
+                        value=config.nfe,
+                        step=1,
+                        label="NFE (transformer steps)",
+                        info="Use the catalog recommendation. More steps are not always better for Turbo LoRAs.",
+                    )
+                    lora_scale = gr.Slider(
+                        0.0,
+                        1.5,
+                        value=1.0,
+                        step=0.05,
+                        label="Turbo / catalog LoRA strength",
+                        info="Recommended default is 1.0. Reduce it when stacking strong extra LoRAs.",
+                    )
+                    seed_mode = gr.Radio(
+                        choices=["Fixed", "Random each generation"],
+                        value="Fixed",
+                        label="Seed mode",
+                    )
+                    seed = gr.Number(value=config.seed, precision=0, label="Seed")
+                    seed_note = gr.Textbox(
+                        value="Fixed seed will be reused.",
+                        label="Seed used",
+                        interactive=False,
+                    )
+                with gr.Row():
+                    reset_btn = gr.Button("Reset recommended defaults", variant="secondary")
                 run_btn = gr.Button("Generate video + audio", variant="primary")
 
         video = gr.Video(label="Output MP4 (H.264 + AAC)", autoplay=True)
-        summary = gr.Textbox(label="Run summary", lines=3)
+        summary = gr.Textbox(
+            label="Run summary and performance",
+            lines=5,
+            elem_id="run-summary",
+        )
 
         lora_id.change(
-            lambda lora: (
+            lambda lora, count, *scales: (
                 config.lora_by_id(lora).nfe,
                 config.lora_by_id(lora).lora_scale,
                 config.lora_by_id(lora).notes,
+                _lora_guidance(config, lora, count, *scales),
             ),
-            inputs=lora_id,
-            outputs=[nfe, lora_scale, lora_notes],
+            inputs=[lora_id, extra_lora_count, *extra_scales],
+            outputs=[nfe, lora_scale, lora_notes, lora_help],
         )
+        extra_lora_count.change(
+            _lora_slot_updates,
+            inputs=extra_lora_count,
+            outputs=lora_rows,
+        ).then(
+            lambda lora, count, *scales: _lora_guidance(config, lora, count, *scales),
+            inputs=[lora_id, extra_lora_count, *extra_scales],
+            outputs=lora_help,
+        )
+        for strength in extra_scales:
+            strength.change(
+                lambda lora, count, *scales: _lora_guidance(config, lora, count, *scales),
+                inputs=[lora_id, extra_lora_count, *extra_scales],
+                outputs=lora_help,
+            )
         refresh_loras.click(
             lambda: tuple(
                 gr.Dropdown(choices=_stored_lora_choices(config))
@@ -393,9 +568,13 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             outputs=stored_loras,
         )
         lora_upload.upload(
-            lambda upload: _save_uploaded_lora(config, upload),
-            inputs=lora_upload,
-            outputs=[stored_loras[0], lora_upload],
+            lambda upload, count: (
+                *_save_uploaded_lora(config, upload),
+                max(1, int(count or 0)),
+                gr.update(visible=True),
+            ),
+            inputs=[lora_upload, extra_lora_count],
+            outputs=[stored_loras[0], lora_upload, extra_lora_count, lora_rows[0]],
         )
         seed_mode.change(
             lambda mode: (
@@ -408,6 +587,35 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
             outputs=[seed, seed_note],
         )
 
+        reset_outputs = [
+            prompt,
+            first_image,
+            last_image,
+            lora_id,
+            extra_lora_count,
+            *stored_loras,
+            lora_upload,
+            preset,
+            aspect_ratio,
+            duration,
+            nfe,
+            seed_mode,
+            seed,
+            lora_scale,
+            *extra_scales,
+            structured,
+            lora_notes,
+            lora_help,
+            seed_note,
+        ]
+        reset_btn.click(
+            lambda: _recommended_reset_values(config),
+            outputs=reset_outputs,
+        ).then(
+            lambda: _lora_slot_updates(0),
+            outputs=lora_rows,
+        )
+
         run_btn.click(
             generate,
             inputs=[
@@ -415,6 +623,7 @@ def build_app(config: Optional[AppConfig] = None) -> gr.Blocks:
                 first_image,
                 last_image,
                 lora_id,
+                extra_lora_count,
                 *stored_loras,
                 lora_upload,
                 duration,

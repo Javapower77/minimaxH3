@@ -6,6 +6,7 @@ from minimax_h3_fl2v.lora import (
     LORA_B_SUFFIX,
     _normalize_keys,
     _validate_state_dict,
+    validate_pruned_fl2va_lora,
     validate_lora_workflow,
 )
 
@@ -76,3 +77,60 @@ def test_allow_generic_lora_in_fl2va_workflow(tmp_path):
         metadata={"ss_base_model_version": "minimax_h3"},
     )
     validate_lora_workflow(path, "fl2va")
+
+
+def test_reject_pruned_lora_on_full_diffusers_transformer(tmp_path):
+    path = tmp_path / "multistep-pruned.safetensors"
+    save_file(
+        {"diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight": torch.zeros(4, 8)},
+        path,
+        metadata={
+            "output_mode": "pruned",
+            "adaln_target_width": "8",
+            "adaln_source_width": "2688",
+        },
+    )
+    try:
+        validate_lora_workflow(path, "fl2va")
+    except ValueError as exc:
+        assert "pruned" in str(exc)
+        assert "8-wide AdaLN" in str(exc)
+        assert "2688-wide AdaLN" in str(exc)
+    else:
+        raise AssertionError("expected pruned architecture rejection")
+
+
+def test_reject_incomplete_safetensors_with_actionable_error(tmp_path):
+    path = tmp_path / "partial.safetensors"
+    path.write_bytes(b"partial download")
+    try:
+        validate_lora_workflow(path, "fl2va")
+    except ValueError as exc:
+        assert "incomplete or corrupt" in str(exc)
+        assert "SHA-256" in str(exc)
+    else:
+        raise AssertionError("expected incomplete SafeTensors rejection")
+
+
+def test_pruned_validator_accepts_eight_wide_adaln(tmp_path):
+    path = tmp_path / "pruned-style.safetensors"
+    save_file(
+        {"diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight": torch.zeros(4, 8)},
+        path,
+        metadata={"ss_base_model_version": "minimax_h3_fl2va"},
+    )
+    validate_pruned_fl2va_lora(path)
+
+
+def test_pruned_validator_rejects_full_adaln(tmp_path):
+    path = tmp_path / "full-style.safetensors"
+    save_file(
+        {"diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight": torch.zeros(4, 2688)},
+        path,
+    )
+    try:
+        validate_pruned_fl2va_lora(path)
+    except ValueError as exc:
+        assert "input width 2688" in str(exc)
+    else:
+        raise AssertionError("expected full AdaLN rejection")

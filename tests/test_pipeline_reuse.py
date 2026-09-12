@@ -163,3 +163,36 @@ def test_incompatible_lora_is_rejected_before_current_adapters_are_unloaded(tmp_
         raise AssertionError("expected incompatible workflow rejection")
     assert engine.pipe.unload_calls == 0
     assert engine.pipe.load_calls == []
+
+
+def test_unpruned_modular_denoise_block_emits_detailed_steps():
+    class Denoise:
+        def progress_bar(self, iterable=None, total=None):
+            return "original"
+
+    class Blocks:
+        sub_blocks = {"text_encoder": object(), "denoise.denoise": Denoise()}
+
+    class Pipe:
+        blocks = Blocks()
+
+    engine = MiniMaxH3Engine(AppConfig())
+    engine.pipe = Pipe()
+    events = []
+    block, original = engine._install_denoise_progress(
+        lambda fraction, message: events.append((fraction, message)),
+        0.0,
+    )
+    with block.progress_bar(total=4) as progress:
+        for _ in range(4):
+            progress.update()
+    engine._restore_denoise_progress(block, original)
+
+    assert [f"step {index}/4" in events[index - 1][1] for index in range(1, 5)] == [
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert "decoding video/audio" in events[-1][1]
+    assert block.progress_bar() == "original"

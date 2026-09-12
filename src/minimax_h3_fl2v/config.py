@@ -46,6 +46,7 @@ class LoRASpec:
     notes: str = ""
     recommended: bool = False
     local_path: Optional[Path] = None
+    backend: str = "diffusers"
 
     @property
     def is_base(self) -> bool:
@@ -162,6 +163,7 @@ def load_lora_catalog(path: Path = DEFAULT_LORA_CATALOG_PATH) -> list[LoRASpec]:
                 megapixels=float(item.get("megapixels", 1.0)),
                 notes=item.get("notes", ""),
                 recommended=bool(item.get("recommended", False)),
+                backend=str(item.get("backend", "diffusers")),
             )
         )
     return catalog

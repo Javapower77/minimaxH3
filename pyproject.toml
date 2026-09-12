@@ -34,6 +34,8 @@ dependencies = [
   "sentencepiece>=0.2.0",
   "protobuf>=5.29.0",
   "soundfile>=0.13.0",
+  "requests>=2.32.0",
+  "websocket-client>=1.8.0",
   "tqdm>=4.67.0",
 ]
 

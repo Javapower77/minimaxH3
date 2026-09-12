@@ -1,8 +1,11 @@
 from pathlib import Path
 
-from minimax_h3_fl2v.config import AppConfig
+from minimax_h3_fl2v.config import AppConfig, LoRASpec
 from minimax_h3_fl2v.ui import (
     MAX_SEED,
+    _lora_guidance,
+    _lora_slot_updates,
+    _recommended_reset_values,
     _resolve_seed,
     _save_uploaded_lora,
     _selected_extra_loras,
@@ -47,3 +50,44 @@ def test_seed_fixed_and_random_modes():
     assert _resolve_seed("Fixed", 123456) == 123456
     random_seed = _resolve_seed("Random each generation", 123456)
     assert 0 <= random_seed <= MAX_SEED
+
+
+def test_lora_slot_updates_show_exact_count():
+    updates = _lora_slot_updates(3)
+    assert [update["visible"] for update in updates] == [True, True, True, False, False]
+
+
+def test_lora_guidance_warns_for_strong_large_stack():
+    cfg = AppConfig(
+        catalog=[
+            LoRASpec(
+                id="turbo",
+                name="Turbo",
+                nfe=8,
+                lora_scale=1.0,
+                video_shift=6,
+                audio_shift=3,
+            )
+        ]
+    )
+    guidance = _lora_guidance(cfg, "turbo", 4, 0.4, 1.3, 0.5, 0.6)
+    assert "NFE **8**" in guidance
+    assert "above 1.2" in guidance
+    assert "Four or five" in guidance
+
+
+def test_reset_values_restore_zero_extra_loras():
+    cfg = AppConfig(
+        default_lora_id="turbo",
+        seed=42,
+        catalog=[
+            LoRASpec(
+                id="turbo", name="Turbo", nfe=8, lora_scale=1.0, notes="recommended"
+            )
+        ],
+    )
+    values = _recommended_reset_values(cfg)
+    assert values[3] == "turbo"
+    assert values[4] == 0
+    assert values[5:10] == (None, None, None, None, None)
+    assert values[15] == "Fixed"
